@@ -14,13 +14,14 @@ Make your own V body for Cyberpunk 2077, female or male. Start from the vanilla 
 
 You also need [Blender 4.2 or newer](https://www.blender.org/download/) and the game. The launcher downloads WolvenKit CLI for you with one button, and offers to install the [.NET 10 Runtime](https://dotnet.microsoft.com/download/dotnet/10.0) that WolvenKit needs if it is missing. If you start from a body mod, keep that mod installed. Full guide is in `README.txt` inside the zip.
 
-To refit clothing for your new body, use [Refit Studio](https://github.com/ANIMEFREG/RefitStudio) (the workshop has an "Add to Refit Studio" button).
+To refit clothing for your new body, use [Refit Studio](https://github.com/ANIMEFREG/RefitStudio) (exporting the body adds it to Refit Studio by itself).
 
 ## What it does
 
 - Female and male V, from the vanilla body or a body mod (tested with vanilla, SLIM THIN, EVE and Adonis)
 - Sliders for weight, breasts or pecs, waist, belly, hips, butt and legs, plus advanced sliders
 - Presets, your own presets, sculpt brushes with symmetry, before and after view
+- Profiles to save and load all your settings, mirror sculpting, a picture of your body for Nexus
 - Body check before export (flipped triangles, sharp creases, the body going into the arms)
 - The neck, arm joins and feet never move, so the head, arms, cyberware arms and shoes still fit
 - The new shape is written into every body file: breast variants, first person view, tattoos, scars, shadow
@@ -44,6 +45,17 @@ Requirements: Windows 10 or 11. No extra tools needed - it uses the C# compiler 
 `core/` is plain Python source, nothing to build.
 
 ## Changelog
+
+### 0.2.0
+
+- Profiles: "Save profile" (or Ctrl+S) keeps all your settings, load one to get your body back
+- The workshop always opens with a clean body
+- On close it asks to save a profile if something changed
+- Symmetry is on by default and can be turned off with a checkbox
+- Mirror sculpting copies one side of the body to the other
+- Picture for Nexus saves front, side and back views of your body
+- Exporting to Vortex or zip adds the body to Refit Studio by itself
+- Smooth rounded corners in the launcher, offer to make a desktop shortcut
 
 ### 0.1.0
 

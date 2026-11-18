@@ -77,20 +77,6 @@ def load_project():
     return S['project']
 
 
-def save_project():
-    p = S['project']
-    sc = bpy.context.scene
-    p['values'] = {k: round(float(getattr(sc, 'bs_' + k)), 4) for k, _, _ in BS.SLIDERS}
-    p['name'] = sc.bs_name.strip() or p.get('name', 'My body')
-    p['tag'] = sc.bs_tag.strip()
-    sync_sculpt()
-    np.save(project_path('sculpt.npy'), S['sculpt'].astype(np.float32))
-    tmp = project_path('project.json.tmp')
-    with open(tmp, 'w', encoding='utf-8') as f:
-        json.dump(p, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, project_path('project.json'))
-
-
 def base_mod():
     path = S['project'].get('base_mod') or ''
     if not path:
@@ -164,6 +150,13 @@ def refresh_shape():
     write_co(ob, shape(S['applied']) + S['sculpt'])
     if S.get('marked'):   # форма поменялась - старые отметки проверки уже не про неё
         paint_body(None)
+
+
+def on_symmetry(self, context):
+    """Галочка «Симметрия» сразу включает или выключает её на теле."""
+    ob = body_obj()
+    if ob is not None:
+        ob.use_mesh_mirror_x = self.bs_symmetry
 
 
 def on_slider(self, context):
@@ -242,37 +235,42 @@ def setup_scene(prog=None):
     base = BS.Base(BS.set_json(S['pdir'], s, BS.s_torso(s)), BS.gender_of(s))
     S['base'] = base
     S['F'] = base.fields()
-    sc_file = project_path('sculpt.npy')
-    S['sculpt'] = np.zeros_like(base.pos)
-    if os.path.isfile(sc_file):
-        d = np.load(sc_file).astype(np.float64)
-        if d.shape == base.pos.shape:
-            S['sculpt'] = d
+    S['sculpt'] = np.zeros_like(base.pos)   # каждый запуск с нуля, сохранённое - только в профилях
     ob = build_object(BODY_OBJ, base.pos, base.tris, coll, body_colors())
     set_mask(ob, base.lock)
     S['arms'] = []
     S['marked'] = False
+    S['mirror'] = None
     for k, r in BS.s_arms(s).items():
         if r in s['files']:
             p, t, _ = MeshPos(BS.set_json(S['pdir'], s, r)).lod0()
             S['arms'].append((np.asarray(p, np.float64), np.asarray(t)))
             a = build_object(tr('Рука', 'Arm') + k[-2:], p, t, coll, np.tile(ARM, (len(p), 1)))
             a.hide_select = True
-    # значения ползунков из проекта
+    # всё на нуле: ползунки, тег, симметрия включена, тонкие настройки скрыты; имя - из лаунчера
     sc = bpy.context.scene
     S['loading'] = True
     try:
         for k, _, _ in BS.SLIDERS:
-            setattr(sc, 'bs_' + k, float(S['project'].get('values', {}).get(k, 0.0)))
+            setattr(sc, 'bs_' + k, 0.0)
         sc.bs_name = S['project'].get('name', '')
-        sc.bs_tag = S['project'].get('tag', '')
+        sc.bs_tag = ''
+        sc.bs_symmetry = True
+        sc.bs_advanced = False
+        prof = list_profiles()   # в списке сразу последний профиль, но сам он не загружается
+        try:
+            sc.bs_profile = prof[0][0] if prof else NO_PROF
+        except Exception:
+            pass
     finally:
         S['loading'] = False
     S['applied'] = values()
     write_co(ob, shape(S['applied']) + S['sculpt'])
+    ob.use_mesh_mirror_x = sc.bs_symmetry
     bpy.context.view_layer.objects.active = ob
     ob.select_set(True)
     setup_view()
+    mark_saved()
 
 
 def setup_view():
@@ -331,24 +329,15 @@ class BODY_OT_reset(bpy.types.Operator):
         return {'FINISHED'}
 
 
-class BODY_OT_save(bpy.types.Operator):
-    bl_idname = 'body.save'
-    bl_label = tr('Сохранить', 'Save')
-    bl_description = tr('Сохранить тело (ползунки и лепку), чтобы продолжить потом', 'Save the body (sliders and sculpting) to continue later')
-
-    def execute(self, context):
-        save_project()
-        report(self, tr('Сохранено.', 'Saved.'))
-        return {'FINISHED'}
-
-
 TIPS = {
     'sculpt': (tr('Лепка тела', 'Sculpting the body'), tr(
-        'Кисти меняют форму тела вручную. Симметрия включена: что делаешь слева, повторится справа.\n'
+        'Кисти меняют форму тела вручную. Симметрия включена: что делаешь слева, повторится справа. '
+        'Её можно выключить галочкой «Симметрия».\n'
         'Синеватые зоны (шея, стык с руками, ступни) закрыты: там тело соединяется с головой, руками и '
         'обувью, поэтому их менять нельзя, иначе в игре появятся дыры на швах.\n'
         'Работай небольшой силой и короткими мазками. Если что-то пошло не так: Ctrl+Z или «Сбросить лепку».',
-        'Brushes change the body shape by hand. Symmetry is on: what you do on the left repeats on the right.\n'
+        'Brushes change the body shape by hand. Symmetry is on: what you do on the left repeats on the right. '
+        'You can turn it off with the "Symmetry" checkbox.\n'
         'Bluish zones (neck, arm joins, feet) are locked: that is where the body connects to the head, arms and '
         'shoes, so they cannot change, otherwise holes would appear at the seams in the game.\n'
         'Use low strength and short strokes. If something goes wrong: Ctrl+Z or "Reset sculpting".')),
@@ -457,7 +446,7 @@ class BODY_OT_sculpt(bpy.types.Operator):
         context.view_layer.objects.active = ob
         ob.select_set(True)
         bpy.ops.object.mode_set(mode='SCULPT')
-        ob.use_mesh_mirror_x = True
+        ob.use_mesh_mirror_x = context.scene.bs_symmetry
         activate_brush('Grab')
         if context.scene.bs_tab != 'SCULPT':
             context.scene.bs_tab = 'SCULPT'
@@ -709,6 +698,234 @@ class BODY_OT_preset_delete(bpy.types.Operator):
         return {'FINISHED'}
 
 
+# ---------- профили тела ----------
+# Мастерская всегда открывает тело с нуля. Всё, что нужно сохранить (ползунки, лепку, имя, тег,
+# симметрию, тонкие настройки), сохраняется профилем: <проект>\profiles\<id>\profile.json + sculpt.npy.
+
+_profile_items = []
+NO_PROF = 'none'   # пункт списка, когда профилей ещё нет
+
+
+def chosen_profile(sc):
+    v = sc.bs_profile or ''
+    return '' if v == NO_PROF else v
+
+
+def profiles_dir():
+    return project_path('profiles')
+
+
+def list_profiles():
+    """[(id, данные)] новые сверху."""
+    out = []
+    if not S.get('pdir'):
+        return out
+    d = profiles_dir()
+    if not os.path.isdir(d):
+        return out
+    for pid in os.listdir(d):
+        try:
+            out.append((pid, json.load(open(os.path.join(d, pid, 'profile.json'), encoding='utf-8'))))
+        except Exception:
+            pass
+    return sorted(out, key=lambda x: x[1].get('saved', x[0]), reverse=True)
+
+
+def profile_items(self, context):
+    items = []
+    for i, (pid, v) in enumerate(list_profiles()):
+        items.append((pid, f"{v.get('name', pid)}  ·  {v.get('when', '')}",
+                      tr('Сохранённый профиль тела', 'A saved body profile'), 'FILE_BACKUP', i))
+    if not items:
+        items = [(NO_PROF, tr('пока нет профилей', 'no profiles yet'), '', 'BLANK1', 0)]
+    _profile_items[:] = items
+    return _profile_items
+
+
+def default_profile_name():
+    cur = chosen_profile(bpy.context.scene)
+    for pid, v in list_profiles():
+        if pid == cur:
+            return v.get('name', '')
+    return tr('Профиль ', 'Profile ') + str(len(list_profiles()) + 1)
+
+
+class BODY_OT_profile_save(bpy.types.Operator):
+    bl_idname = 'body.profile_save'
+    bl_label = tr('Сохранить профиль', 'Save profile')
+    bl_description = tr('Сохранить всё как есть: ползунки, лепку, имя, тег, симметрию. '
+                        'Без профиля мастерская при следующем запуске начнёт с нуля',
+                        'Save everything as it is: sliders, sculpting, name, tag, symmetry. '
+                        'Without a profile the workshop starts from zero next time')
+    name: bpy.props.StringProperty(name=tr('Имя', 'Name'), options={'SKIP_SAVE'})
+
+    def invoke(self, context, event):
+        self.name = default_profile_name()
+        return context.window_manager.invoke_props_dialog(self, width=340, title=self.bl_label,
+                                                          confirm_text=tr('Сохранить', 'Save'))
+
+    def draw(self, context):
+        self.layout.prop(self, 'name')
+        self.layout.label(text=tr('Такое же имя - профиль обновится.', 'Same name - the profile is updated.'), icon='INFO')
+
+    def execute(self, context):
+        import datetime
+        sc = context.scene
+        name = self.name.strip() or tr('Профиль ', 'Profile ') + str(len(list_profiles()) + 1)
+        was = context.mode == 'SCULPT'
+        sync_sculpt()
+        now = datetime.datetime.now()
+        same = next((pid for pid, v in list_profiles() if v.get('name') == name), None)
+        pid = same or now.strftime('%Y%m%d_%H%M%S_%f')
+        d = os.path.join(profiles_dir(), pid)
+        os.makedirs(d, exist_ok=True)
+        np.save(os.path.join(d, 'sculpt.npy'), S['sculpt'].astype(np.float32))
+        v = {'name': name, 'when': now.strftime('%d.%m %H:%M'), 'saved': now.isoformat(timespec='microseconds'),
+             'values': {k: round(float(x), 4) for k, x in values().items()},
+             'body_name': sc.bs_name, 'tag': sc.bs_tag, 'symmetry': bool(sc.bs_symmetry), 'advanced': bool(sc.bs_advanced)}
+        tmp = os.path.join(d, 'profile.json.tmp')
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(v, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, os.path.join(d, 'profile.json'))
+        try:   # в лаунчере дата «Изменено» берётся у project.json
+            os.utime(project_path('project.json'))
+        except Exception:
+            pass
+        sc.bs_profile = pid
+        mark_saved()
+        if was:
+            bpy.ops.object.mode_set(mode='SCULPT')
+        report(self, tr(f'Профиль «{name}» ' + ('обновлён.' if same else 'сохранён.'),
+                        f'Profile "{name}" ' + ('updated.' if same else 'saved.')))
+        return {'FINISHED'}
+
+
+class BODY_OT_profile_load(bpy.types.Operator):
+    bl_idname = 'body.profile_load'
+    bl_label = tr('Загрузить профиль', 'Load profile')
+    bl_description = tr('Поставить всё как в выбранном профиле («Отменить» вернёт как было)',
+                        'Set everything as in the chosen profile (Undo brings it back)')
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        sc = context.scene
+        pid = chosen_profile(sc)
+        d = os.path.join(profiles_dir(), pid)
+        if not pid or not os.path.isfile(os.path.join(d, 'profile.json')):
+            raise UserError(tr('Выбери профиль.', 'Choose a profile.'))
+        v = json.load(open(os.path.join(d, 'profile.json'), encoding='utf-8'))
+        vals = v.get('values', {})
+        was = context.mode == 'SCULPT'
+        sync_sculpt()
+        note = ''
+        sculpt = np.zeros_like(S['base'].pos)
+        f = os.path.join(d, 'sculpt.npy')
+        if os.path.isfile(f):
+            a = np.load(f).astype(np.float64)
+            if a.shape == sculpt.shape:
+                sculpt = a * (S['base'].lock > 0)[:, None]
+            else:
+                note = tr(' Лепку из него вернуть нельзя: основа тела с тех пор поменялась.',
+                          ' Its sculpting cannot come back: the base body changed since then.')
+        S['loading'] = True
+        try:
+            for k, _, _ in BS.SLIDERS:
+                setattr(sc, 'bs_' + k, float(vals.get(k, 0.0)))
+            sc.bs_name = v.get('body_name') or S['project'].get('name', '')
+            sc.bs_tag = v.get('tag', '')
+            sc.bs_symmetry = bool(v.get('symmetry', True))
+        finally:
+            S['loading'] = False
+        S['sculpt'] = sculpt
+        S['applied'] = values()
+        ob = body_obj()
+        write_co(ob, shape(S['applied']) + S['sculpt'])
+        ob.use_mesh_mirror_x = sc.bs_symmetry
+        if S.get('marked'):
+            paint_body(None)
+        fine = {k for keys in advanced().values() for k in keys}
+        sc.bs_advanced = bool(v.get('advanced')) or any(abs(vals.get(k, 0.0)) > 1e-6 for k in fine)
+        mark_saved()
+        if was:
+            bpy.ops.object.mode_set(mode='SCULPT')
+        name = v.get('name', pid)
+        report(self, tr(f'Профиль «{name}» загружен.', f'Profile "{name}" loaded.') + note)
+        return {'FINISHED'}
+
+
+class BODY_OT_profile_delete(bpy.types.Operator):
+    bl_idname = 'body.profile_delete'
+    bl_label = tr('Удалить профиль', 'Delete profile')
+    bl_description = tr('Удалить выбранный профиль (само тело на экране не меняется)',
+                        'Delete the chosen profile (the body on screen stays)')
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_confirm(self, event)
+
+    def execute(self, context):
+        pid = chosen_profile(context.scene)
+        d = os.path.join(profiles_dir(), pid)
+        if not pid or not os.path.isdir(d):
+            raise UserError(tr('Выбери профиль.', 'Choose a profile.'))
+        C.rmtree(d)
+        rest = list_profiles()
+        if rest:
+            context.scene.bs_profile = rest[0][0]
+        report(self, tr('Профиль удалён.', 'Profile deleted.'))
+        return {'FINISHED'}
+
+
+# ---------- выровнять лепку ----------
+
+def mirror_map():
+    """Для каждой точки - её пара с другой стороны тела (по основе)."""
+    if S.get('mirror') is None or len(S['mirror']) != S['base'].n:
+        from mathutils import kdtree
+        P = S['base'].pos
+        kd = kdtree.KDTree(len(P))
+        for i, p in enumerate(P):
+            kd.insert(p, i)
+        kd.balance()
+        S['mirror'] = np.array([kd.find((-p[0], p[1], p[2]))[1] for p in P], np.int64)
+    return S['mirror']
+
+
+class BODY_OT_mirror(bpy.types.Operator):
+    bl_idname = 'body.mirror'
+    bl_label = tr('Выровнять лепку', 'Mirror sculpting')
+    bl_description = tr('Сделать одну сторону тела как другую: полезно, если лепил без симметрии',
+                        'Make one side of the body like the other: handy if you sculpted without symmetry')
+    bl_options = {'REGISTER', 'UNDO'}
+    side: bpy.props.EnumProperty(items=[('LEFT', 'left', ''), ('RIGHT', 'right', '')], default='LEFT')
+
+    @classmethod
+    def description(cls, context, props):
+        if props.side == 'LEFT':
+            return tr('Левую сторону тела скопировать на правую (лево и право самого тела, как у V)',
+                      "Copy the body's left side onto the right (V's own left and right)")
+        return tr('Правую сторону тела скопировать на левую (лево и право самого тела, как у V)',
+                  "Copy the body's right side onto the left (V's own left and right)")
+
+    def execute(self, context):
+        was = context.mode == 'SCULPT'
+        sync_sculpt()
+        m = mirror_map()
+        P = S['base'].pos
+        d = S['sculpt'].copy()
+        src = d[m] * np.array((-1.0, 1.0, 1.0))
+        # тело смотрит на +Y, значит левая сторона V - это -X
+        target = P[:, 0] > 1e-4 if self.side == 'LEFT' else P[:, 0] < -1e-4
+        d[target] = src[target]
+        d[np.abs(P[:, 0]) <= 1e-4, 0] = 0.0   # середина тела не уезжает вбок
+        d *= (S['base'].lock > 0)[:, None]
+        S['sculpt'] = d
+        write_co(body_obj(), shape(S['applied']) + S['sculpt'])
+        if was:
+            bpy.ops.object.mode_set(mode='SCULPT')
+        report(self, tr('Готово: обе стороны теперь одинаковые.', 'Done: both sides are the same now.'))
+        return {'FINISHED'}
+
+
 # ---------- проверка ----------
 
 def shape_problems():
@@ -770,7 +987,6 @@ def export_name():
 
 def make_mod(prog):
     """Собирает zip мода тела из текущей формы."""
-    save_project()
     d = final_disp()
     if np.abs(d).max() < 1e-5:
         raise UserError(tr('Тело пока не отличается от основы: подвигай ползунки или полепи.',
@@ -812,9 +1028,9 @@ def warn_popup(lines, title=None):
         C.log('warn popup:\n' + traceback.format_exc())
 
 
-def finish_export(op, ok_msg):
+def finish_export(op, ok_msg, extra=()):
     """Итог экспорта: если в игре чего-то не хватает или форма с проблемами - предупреждение вместо «Готово»."""
-    w = deploy_warnings()
+    w = deploy_warnings() + list(extra)
     try:
         msgs, marks = shape_problems()
         if msgs:
@@ -836,42 +1052,6 @@ def run_export(op, title, fn):
         return fn(prog)
     finally:
         prog.done()
-
-
-class BODY_OT_export_vortex(bpy.types.Operator):
-    bl_idname = 'body.export_vortex'
-    bl_label = tr('В Vortex', 'To Vortex')
-    bl_description = tr('Собрать мод тела и сразу установить его через Vortex', 'Build the body mod and install it with Vortex')
-
-    def execute(self, context):
-        vortex = C.find_vortex()
-        if not vortex:
-            raise UserError(tr('Vortex не найден. Сохрани zip и установи его вручную.', 'Vortex not found. Save a zip and install it by hand.'))
-        zp, _, _ = run_export(self, tr('Экспорт', 'Export'), make_mod)
-        C.send_to_vortex(vortex, zp)
-        finish_export(self, tr('Готово! Мод отправлен в Vortex. Включи его там (Enable) и разверни (Deploy).',
-                               'Done! The mod was sent to Vortex. Enable it there and Deploy.'))
-        return {'FINISHED'}
-
-
-class BODY_OT_export_zip(bpy.types.Operator):
-    bl_idname = 'body.export_zip'
-    bl_label = tr('Сохранить zip…', 'Save zip…')
-    bl_description = tr('Собрать мод тела в zip (для установки вручную или публикации)', 'Build the body mod as a zip (to install by hand or publish)')
-    directory: bpy.props.StringProperty(subtype='DIR_PATH')
-
-    def invoke(self, context, event):
-        self.directory = C.output_dir() + os.sep
-        context.window_manager.fileselect_add(self)
-        return {'RUNNING_MODAL'}
-
-    def execute(self, context):
-        zp, _, _ = run_export(self, tr('Экспорт', 'Export'), make_mod)
-        dst = os.path.join(self.directory or C.output_dir(), os.path.basename(zp))
-        if os.path.abspath(dst) != os.path.abspath(zp):
-            shutil.copyfile(zp, dst)
-        finish_export(self, tr('Сохранено: ', 'Saved: ') + dst)
-        return {'FINISHED'}
 
 
 def profile_pack(arch, root):
@@ -904,33 +1084,203 @@ def profile_pack(arch, root):
     return pdir
 
 
-class BODY_OT_to_refit(bpy.types.Operator):
-    bl_idname = 'body.to_refit'
-    bl_label = tr('В Refit Studio', 'To Refit Studio')
-    bl_description = tr('Добавить это тело в список тел Refit Studio, чтобы подогнать под него одежду',
-                        'Add this body to the Refit Studio body list to refit clothing for it')
+def refit_installed():
+    """Refit Studio стоит на этом компе (есть её папка данных)."""
+    return os.path.isdir(C.REFIT_DATA)
+
+
+def add_to_refit(prog, arch, root):
+    """Тело в список тел Refit Studio. Возвращает предупреждение или None. Без Refit Studio ничего не делает."""
+    if not refit_installed():
+        return None
+    try:
+        prog(92, tr('тело для Refit Studio', 'body for Refit Studio'))
+        pdir = profile_pack(arch, root)
+        r = subprocess.run([bpy.app.binary_path, '-b', '--factory-startup', '--python',
+                            os.path.join(CORE, 'refit_profile.py'), '--', '--mod', pdir,
+                            '--name', export_name(), '--gender', gender()],
+                           capture_output=True, text=True, encoding='utf-8', errors='replace',
+                           creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+        if any(l.startswith('@@OK') for l in r.stdout.splitlines()):
+            S['in_refit'] = True
+            return None
+        err = [l[4:] for l in r.stdout.splitlines() if l.startswith('@@E')]
+        C.log('refit profile:\n' + r.stdout[-3000:] + r.stderr[-2000:])
+        reason = err[0] if err else tr('профиль не собрался', 'the profile was not built')
+    except Exception as e:
+        C.log('refit profile:\n' + traceback.format_exc())
+        reason = str(e)[:200]
+    return tr('В Refit Studio тело не добавилось: ', 'The body was not added to Refit Studio: ') + reason
+
+
+def export_all(prog):
+    """Мод тела + сразу это же тело в Refit Studio. (zip, предупреждения)."""
+    S['in_refit'] = False
+    zp, arch, root = make_mod(prog)
+    w = add_to_refit(prog, arch, root)
+    return zp, [w] if w else []
+
+
+def refit_note():
+    if not S.get('in_refit'):
+        return ''
+    return tr(' Тело уже есть и в Refit Studio (перезапусти её, если открыта).',
+              ' The body is also in Refit Studio now (restart it if it is open).')
+
+
+class BODY_OT_export_vortex(bpy.types.Operator):
+    bl_idname = 'body.export_vortex'
+    bl_label = tr('В Vortex', 'To Vortex')
+    bl_description = tr('Собрать мод тела и сразу установить его через Vortex. Тело само появится и в Refit Studio',
+                        'Build the body mod and install it with Vortex. The body also shows up in Refit Studio')
 
     def execute(self, context):
-        def work(prog):
-            zp, arch, root = make_mod(prog)
-            prog(92, tr('профиль для Refit Studio', 'Refit Studio profile'))
-            pdir = profile_pack(arch, root)
-            r = subprocess.run([bpy.app.binary_path, '-b', '--factory-startup', '--python',
-                                os.path.join(CORE, 'refit_profile.py'), '--', '--mod', pdir,
-                                '--name', export_name(), '--gender', gender()],
-                               capture_output=True, text=True, encoding='utf-8', errors='replace',
-                               creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
-            ok = [l for l in r.stdout.splitlines() if l.startswith('@@OK')]
-            if not ok:
-                err = [l[4:] for l in r.stdout.splitlines() if l.startswith('@@E')]
-                C.log('refit profile:\n' + r.stdout[-3000:] + r.stderr[-2000:])
-                raise RuntimeError(err[0] if err else tr('профиль не собрался', 'the profile was not built'))
-            return zp
-        run_export(self, tr('Refit Studio', 'Refit Studio'), work)
-        finish_export(self, tr('Готово! Тело появилось в Refit Studio (перезапусти её, если она открыта). '
-                               'Само тело для игры поставь кнопкой «В Vortex».',
-                               'Done! The body is now in Refit Studio (restart it if it is open). '
-                               'Install the body itself with "To Vortex".'))
+        vortex = C.find_vortex()
+        if not vortex:
+            raise UserError(tr('Vortex не найден. Сохрани zip и установи его вручную.', 'Vortex not found. Save a zip and install it by hand.'))
+        zp, w = run_export(self, tr('Экспорт', 'Export'), export_all)
+        C.send_to_vortex(vortex, zp)
+        finish_export(self, tr('Готово! Мод отправлен в Vortex. Включи его там (Enable) и разверни (Deploy).',
+                               'Done! The mod was sent to Vortex. Enable it there and Deploy.') + refit_note(), w)
+        return {'FINISHED'}
+
+
+class BODY_OT_export_zip(bpy.types.Operator):
+    bl_idname = 'body.export_zip'
+    bl_label = tr('Zip для Nexus…', 'Zip for Nexus…')
+    bl_description = tr('Собрать мод тела в zip: его можно выложить на Nexus или поставить вручную. '
+                        'Тело само появится и в Refit Studio',
+                        'Build the body mod as a zip to upload to Nexus or install by hand. '
+                        'The body also shows up in Refit Studio')
+    directory: bpy.props.StringProperty(subtype='DIR_PATH')
+
+    def invoke(self, context, event):
+        self.directory = C.output_dir() + os.sep
+        context.window_manager.fileselect_add(self)
+        return {'RUNNING_MODAL'}
+
+    def execute(self, context):
+        zp, w = run_export(self, tr('Экспорт', 'Export'), export_all)
+        dst = os.path.join(self.directory or C.output_dir(), os.path.basename(zp))
+        if os.path.abspath(dst) != os.path.abspath(zp):
+            shutil.copyfile(zp, dst)
+        finish_export(self, tr('Сохранено: ', 'Saved: ') + dst + refit_note(), w)
+        return {'FINISHED'}
+
+
+# ---------- картинка для Nexus ----------
+
+SHOT_H = 1400                     # высота картинки
+SHOT_BG = ((0.11, 0.11, 0.15), (0.04, 0.04, 0.06))   # фон сверху и снизу (sRGB)
+SHOT_VIEWS = (('front', (90, 0, 180), 0), ('side', (90, 0, 90), 1), ('back', (90, 0, 0), 0))
+
+
+def shot_path():
+    return os.path.join(C.output_dir(), C.safe(export_name(), 60) + '_preview.png')
+
+
+def render_preview(path):
+    """Тело спереди, сбоку и сзади на ровном фоне - одна картинка PNG."""
+    from math import radians
+    coll = bpy.data.collections.get(BODY_OBJ)
+    obs = [o for o in coll.objects if o.type == 'MESH'] if coll else []
+    if not obs:
+        raise UserError(tr('Тело ещё не загружено.', 'The body is not loaded yet.'))
+    sync_sculpt()
+    P = np.concatenate([read_co(o) for o in obs])
+    lo, hi = P.min(0), P.max(0)
+    mid = (lo + hi) / 2
+    ppm = SHOT_H * 0.88 / (hi[2] - lo[2])          # точек на метр, одинаково для всех видов
+    pad = int(SHOT_H * 0.05)
+    sc = bpy.data.scenes.new('BS_shot')
+    tmp = C.work_dir('shot')
+    cam = None
+    panels = []
+    try:
+        sc.collection.children.link(coll)
+        r = sc.render
+        r.engine = 'BLENDER_WORKBENCH'
+        r.film_transparent = True
+        r.resolution_percentage = 100
+        r.image_settings.file_format = 'PNG'
+        r.image_settings.color_mode = 'RGBA'
+        sc.view_settings.view_transform = 'Standard'
+        sc.display.render_aa = '16'
+        sh = sc.display.shading
+        sh.light = 'STUDIO'
+        sh.color_type = 'SINGLE'
+        sh.single_color = SKIN[:3]
+        sh.show_cavity = True
+        sh.cavity_type = 'BOTH'
+        sh.show_object_outline = False
+        cam = bpy.data.objects.new('BS_cam', bpy.data.cameras.new('BS_cam'))
+        sc.collection.objects.link(cam)
+        sc.camera = cam
+        cam.data.type = 'ORTHO'
+        for name, rot, axis in SHOT_VIEWS:
+            w = int((hi[axis] - lo[axis]) * ppm) + 2 * pad
+            r.resolution_x, r.resolution_y = w, SHOT_H
+            cam.data.ortho_scale = max(w, SHOT_H) / ppm
+            cam.rotation_euler = tuple(radians(a) for a in rot)
+            d = np.array((0.0, 0.0, 0.0))
+            if axis == 0:
+                d[1] = 5.0 if rot[2] == 180 else -5.0
+            else:
+                d[0] = 5.0
+            cam.location = (mid[0] + d[0], mid[1] + d[1], mid[2])
+            cam.data.clip_end = 20
+            f = os.path.join(tmp, name + '.png')
+            r.filepath = f
+            bpy.ops.render.render(write_still=True, scene=sc.name)
+            img = bpy.data.images.load(f)
+            a = np.empty(img.size[0] * img.size[1] * 4, np.float32)
+            img.pixels.foreach_get(a)
+            panels.append(a.reshape(img.size[1], img.size[0], 4))
+            bpy.data.images.remove(img)
+    finally:
+        if cam:
+            data = cam.data
+            bpy.data.objects.remove(cam, do_unlink=True)
+            bpy.data.cameras.remove(data)
+        bpy.data.scenes.remove(sc)
+        C.rmtree(tmp)
+    gap = pad
+    W = sum(p.shape[1] for p in panels) + gap * (len(panels) - 1)
+    t = np.linspace(1, 0, SHOT_H)[:, None, None]    # пиксели Blender идут снизу вверх
+    top, bot = np.array(SHOT_BG[0]), np.array(SHOT_BG[1])
+    out = np.ones((SHOT_H, W, 4), np.float32)
+    out[..., :3] = bot + (top - bot) * t
+    x = 0
+    for p in panels:
+        al = p[..., 3:4]
+        seg = out[:, x:x + p.shape[1], :3]
+        seg[:] = p[..., :3] * al + seg * (1 - al)
+        x += p.shape[1] + gap
+    img = bpy.data.images.new('BS_preview', W, SHOT_H, alpha=False)
+    try:
+        img.pixels.foreach_set(out.ravel())
+        img.filepath_raw = path
+        img.file_format = 'PNG'
+        img.save()
+    finally:
+        bpy.data.images.remove(img)
+    return path
+
+
+class BODY_OT_nexus_shot(bpy.types.Operator):
+    bl_idname = 'body.nexus_shot'
+    bl_label = tr('Картинка для Nexus', 'Picture for Nexus')
+    bl_description = tr('Снять тело спереди, сбоку и сзади на ровном фоне и сохранить PNG рядом с модами',
+                        'Shoot the body from the front, side and back on a clean background and save a PNG next to the mods')
+
+    def execute(self, context):
+        path = render_preview(shot_path())
+        report(self, tr('Картинка сохранена: ', 'Picture saved: ') + path)
+        if not bpy.app.background:
+            try:
+                subprocess.Popen(['explorer', '/select,', path])
+            except Exception:
+                pass
         return {'FINISHED'}
 
 
@@ -1046,18 +1396,20 @@ def header_draw(self, context):
     if context.mode == 'SCULPT':
         lay.label(text=tr('· лепка', '· sculpting'), icon='SCULPTMODE_HLT')
     lay.separator_spacer()
-    lay.operator('body.save', text=tr('Сохранить', 'Save'), icon='FILE_TICK')
+    lay.operator('body.profile_save', text=tr('Сохранить профиль', 'Save profile'), icon='FILE_TICK')
     lay.operator('body.export_vortex', text=tr('В VORTEX', 'TO VORTEX'), icon='EXPORT', depress=True)
 
 
 def install_keys():
-    """Ctrl+S сохраняет тело (как кнопка «Сохранить»), а не файл сцены программы workshop.blend."""
+    """Ctrl+S сохраняет профиль тела (как кнопка «Сохранить профиль»), а не файл сцены программы workshop.blend."""
     wm = bpy.context.window_manager
     kc = wm.keyconfigs.addon
     if kc:
         km = kc.keymaps.new(name='Window', space_type='EMPTY')
-        if not any(k.idname == 'body.save' for k in km.keymap_items):
-            km.keymap_items.new('body.save', 'S', 'PRESS', ctrl=True)
+        if not any(k.idname == 'body.profile_save' for k in km.keymap_items):
+            km.keymap_items.new('body.profile_save', 'S', 'PRESS', ctrl=True)
+        if not any(k.idname == 'body.quit' for k in km.keymap_items):
+            km.keymap_items.new('body.quit', 'Q', 'PRESS', ctrl=True)
     try:   # без вопроса «Сохранить изменения?» при закрытии: он перезаписал бы workshop.blend
         bpy.context.preferences.view.use_save_prompt = False
     except Exception:
@@ -1066,7 +1418,8 @@ def install_keys():
     km = user.keymaps.get('Window') if user else None
     if km:
         for k in km.keymap_items:
-            if k.idname == 'wm.save_mainfile' and k.type == 'S' and k.ctrl:
+            if (k.idname == 'wm.save_mainfile' and k.type == 'S' and k.ctrl) or \
+                    (k.idname == 'wm.quit_blender' and k.type == 'Q' and k.ctrl):
                 k.active = False
 
 
@@ -1176,11 +1529,156 @@ def window_title():
                         window_icon(h)
                     except Exception:
                         pass
+                    try:
+                        hook_close(h)
+                    except Exception:
+                        C.log('hook close:\n' + traceback.format_exc())
             return True
         u.EnumWindows(ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)(cb), 0)
     except Exception:
         pass
     return 2.0
+
+
+# ---------- вопрос при закрытии ----------
+# Blender не даёт Python перехватить крестик окна, поэтому ловим само сообщение Windows о закрытии
+# (WM_CLOSE: крестик, Alt+F4, «Закрыть окно» на панели задач) у окна мастерской. Если есть
+# несохранённые изменения, вместо закрытия показываем свой вопрос. Ctrl+Q ведёт туда же.
+WM_CLOSE = 0x0010
+_close = {'hooked': {}, 'allow': False, 'last': 0.0}
+
+
+def body_state():
+    """Отпечаток того, что сохраняет профиль: по нему видно, менялось ли тело после сохранения."""
+    sc = bpy.context.scene
+    sculpt = S['sculpt'] if S.get('sculpt') is not None else np.zeros(1)
+    return (tuple(round(float(getattr(sc, 'bs_' + k)), 4) for k, _, _ in BS.SLIDERS),
+            hash(np.rint(sculpt * 1e5).astype(np.int64).tobytes()),   # в целых сотых мм: без «минус нуля» от погрешностей
+            sc.bs_name, sc.bs_tag, bool(sc.bs_symmetry))
+
+
+def mark_saved():
+    """Запомнить: вот так тело выглядит сохранённым (после открытия, сохранения или загрузки профиля)."""
+    try:
+        S['saved_state'] = body_state()
+    except Exception:
+        S['saved_state'] = None
+
+
+def has_changes():
+    if S.get('base') is None or body_obj() is None:
+        return False
+    if bpy.context.mode == 'SCULPT':
+        return True   # во время лепки форма попадает в тело только при выходе из лепки, считаем, что изменения есть
+    sync_sculpt()
+    return body_state() != S.get('saved_state')
+
+
+def main_window_override():
+    wm = bpy.context.window_manager
+    return bpy.context.temp_override(window=bpy.context.window or wm.windows[0])
+
+
+def quit_now():
+    _close['allow'] = True
+    with main_window_override():
+        bpy.ops.wm.quit_blender()
+    return None
+
+
+def ask_close():
+    """Окно хотят закрыть: без изменений закрываем сразу, иначе спрашиваем."""
+    import time
+    if time.time() - _close['last'] < 0.7:   # двойной клик по крестику - один вопрос
+        return None
+    _close['last'] = time.time()
+    try:
+        if not has_changes():
+            return quit_now()
+        with main_window_override():
+            bpy.ops.body.quit_ask('INVOKE_DEFAULT')
+    except Exception:
+        C.log('close ask:\n' + traceback.format_exc())
+        return quit_now()   # что-то сломалось - не держим человека в окне
+    return None
+
+
+def hook_close(h):
+    """Подменяем обработчик сообщений окна: WM_CLOSE идёт к нам, всё остальное - как раньше."""
+    if bpy.app.background or h in _close['hooked']:
+        return
+    import ctypes
+    from ctypes import wintypes
+    u = ctypes.WinDLL('user32')   # своя копия, чтобы типы ниже не задели другие вызовы user32
+    LRESULT = ctypes.c_ssize_t
+    PROC = ctypes.WINFUNCTYPE(LRESULT, wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM)
+    u.CallWindowProcW.restype = LRESULT
+    u.CallWindowProcW.argtypes = [ctypes.c_void_p, wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+    u.SetWindowLongPtrW.restype = ctypes.c_void_p
+    u.SetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_void_p]
+    old = {}
+
+    def proc(hwnd, msg, wp, lp):
+        if msg == WM_CLOSE and not _close['allow']:
+            try:
+                bpy.app.timers.register(ask_close, first_interval=0.01)
+                return 0
+            except Exception:
+                pass
+        return u.CallWindowProcW(old['p'], hwnd, msg, wp, lp)
+
+    cb = PROC(proc)
+    old['p'] = u.SetWindowLongPtrW(h, -4, ctypes.cast(cb, ctypes.c_void_p))   # -4 = GWLP_WNDPROC
+    _close['hooked'][h] = (cb, old)   # держим ссылку, иначе Python удалит обработчик
+
+
+class BODY_OT_quit_ask(bpy.types.Operator):
+    bl_idname = 'body.quit_ask'
+    bl_label = tr('Закрыть мастерскую', 'Close the workshop')
+    bl_description = tr('Закрыть мастерскую (спросит, сохранить ли профиль)', 'Close the workshop (asks to save a profile)')
+    name: bpy.props.StringProperty(name=tr('Имя профиля', 'Profile name'), options={'SKIP_SAVE'})
+
+    def invoke(self, context, event):
+        self.name = default_profile_name()
+        return context.window_manager.invoke_props_dialog(
+            self, width=440, title=tr('Сохранить профиль перед выходом?', 'Save a profile before closing?'),
+            confirm_text=tr('Сохранить и выйти', 'Save and close'))
+
+    def draw(self, context):
+        lay = self.layout
+        lay.label(text=tr('Есть несохранённые изменения.', 'There are unsaved changes.'), icon='INFO')
+        lay.label(text=tr('Без профиля в следующий раз тело начнётся с нуля.', 'Without a profile the body starts from zero next time.'))
+        lay.prop(self, 'name')
+        lay.separator()
+        lay.operator('body.quit_now', text=tr('Выйти без сохранения', 'Close without saving'), icon='CANCEL')
+
+    def execute(self, context):
+        r = bpy.ops.body.profile_save('EXEC_DEFAULT', name=self.name)
+        if r != {'FINISHED'}:
+            return {'CANCELLED'}
+        bpy.app.timers.register(quit_now, first_interval=0.2)
+        return {'FINISHED'}
+
+
+class BODY_OT_quit_now(bpy.types.Operator):
+    bl_idname = 'body.quit_now'
+    bl_label = tr('Выйти без сохранения', 'Close without saving')
+    bl_description = tr('Закрыть мастерскую, не сохраняя изменения', 'Close the workshop without saving the changes')
+
+    def execute(self, context):
+        bpy.app.timers.register(quit_now, first_interval=0.05)
+        return {'FINISHED'}
+
+
+class BODY_OT_quit(bpy.types.Operator):
+    bl_idname = 'body.quit'
+    bl_label = tr('Закрыть мастерскую', 'Close the workshop')
+    bl_description = tr('Закрыть мастерскую (Ctrl+Q)', 'Close the workshop (Ctrl+Q)')
+
+    def execute(self, context):
+        _close['last'] = 0.0
+        bpy.app.timers.register(ask_close, first_interval=0.01)
+        return {'FINISHED'}
 
 
 # ---------- панель ----------
@@ -1269,6 +1767,18 @@ class BODY_PT_panel(bpy.types.Panel):
         row.operator('body.preset_save', text=tr('Сохранить мои', 'Save mine'), icon='ADD')
         if (sc.bs_preset or '').startswith('u:'):
             row.operator('body.preset_delete', text='', icon='TRASH')
+        box = lay.box()
+        box.label(text=tr('Профили', 'Profiles'), icon='FILE_BACKUP')
+        has = bool(chosen_profile(sc))
+        row = box.row(align=True)
+        row.prop(sc, 'bs_profile', text='')
+        sub = row.row(align=True)
+        sub.enabled = has
+        sub.operator('body.profile_load', text=tr('Загрузить', 'Load'))
+        row = box.row(align=True)
+        row.operator('body.profile_save', text=tr('Сохранить профиль', 'Save profile'), icon='ADD')
+        if has:
+            row.operator('body.profile_delete', text='', icon='TRASH')
         g, adv = gender(), advanced()
         for title, keys in groups():
             box = lay.box()
@@ -1296,6 +1806,8 @@ class BODY_PT_panel(bpy.types.Panel):
             big(lay, 1.8).operator('body.sculpt', text=tr('НАЧАТЬ ЛЕПКУ', 'START SCULPTING'),
                                    icon='SCULPTMODE_HLT', depress=True)
             big(lay, 1.2).operator('body.reset', text=tr('Сбросить лепку', 'Reset sculpting'), icon='LOOP_BACK').what = 'SCULPT'
+            lay.prop(context.scene, 'bs_symmetry')
+            self.draw_mirror(lay)
             return
         ts = context.tool_settings.sculpt
         brush = ts.brush
@@ -1313,7 +1825,8 @@ class BODY_PT_panel(bpy.types.Panel):
             c.prop(ups if ups.use_unified_strength else brush, 'strength', text=tr('Сила', 'Strength'), slider=True)
         ob = body_obj()
         if ob:
-            lay.prop(ob, 'use_mesh_mirror_x', text=tr('Симметрия (левая = правая)', 'Symmetry (left = right)'))
+            lay.prop(context.scene, 'bs_symmetry')
+        self.draw_mirror(lay)
         row = big(lay, 1.2)
         row.operator('ed.undo', text=tr('Отменить', 'Undo'), icon='LOOP_BACK')
         row.operator('ed.redo', text=tr('Повторить', 'Redo'), icon='LOOP_FORWARDS')
@@ -1323,14 +1836,23 @@ class BODY_PT_panel(bpy.types.Panel):
         hint.label(text=tr('Средняя кнопка - вращать', 'Middle button - rotate'))
         hint.label(text=tr('F - размер кисти, Shift+F - сила', 'F - brush size, Shift+F - strength'))
 
+    def draw_mirror(self, lay):
+        box = lay.box()
+        box.label(text=tr('Выровнять лепку (стороны V):', 'Mirror sculpting (V sides):'), icon='MOD_MIRROR')
+        row = box.row(align=True)
+        row.operator('body.mirror', text=tr('Левую на правую', 'Left to right')).side = 'LEFT'
+        row.operator('body.mirror', text=tr('Правую на левую', 'Right to left')).side = 'RIGHT'
+
     def draw_export(self, lay, context):
         sc = context.scene
         lay.prop(sc, 'bs_name', text=tr('Имя', 'Name'))
         lay.prop(sc, 'bs_tag', text=tr('Тег тела', 'Body tag'))
         lay.separator()
         big(lay, 1.8).operator('body.export_vortex', text=tr('В VORTEX', 'TO VORTEX'), icon='EXPORT', depress=True)
-        big(lay, 1.3).operator('body.export_zip', text=tr('Сохранить zip…', 'Save zip…'), icon='FILE_FOLDER')
-        big(lay, 1.3).operator('body.to_refit', text=tr('Добавить в Refit Studio', 'Add to Refit Studio'), icon='MOD_CLOTH')
+        big(lay, 1.3).operator('body.export_zip', text=tr('Zip для Nexus…', 'Zip for Nexus…'), icon='FILE_FOLDER')
+        big(lay, 1.3).operator('body.nexus_shot', text=tr('Картинка для Nexus', 'Picture for Nexus'), icon='RENDER_STILL')
+        if refit_installed():
+            lay.label(text=tr('Тело само попадёт и в Refit Studio', 'The body also goes to Refit Studio'), icon='MOD_CLOTH')
         lay.separator()
         row = big(lay, 1.3)
         row.operator('body.check', text=tr('Проверить тело', 'Check the body'), icon='VIEWZOOM')
@@ -1346,9 +1868,11 @@ class BODY_PT_panel(bpy.types.Panel):
         hint.label(text=tr('Тег пустой - как у основы.', 'Empty tag - same as the base.'))
 
 
-classes = (BODY_OT_reset, BODY_OT_save, BODY_OT_sculpt, BODY_OT_brush, BODY_OT_sculpt_done,
+classes = (BODY_OT_reset, BODY_OT_sculpt, BODY_OT_brush, BODY_OT_sculpt_done,
            BODY_OT_preset_apply, BODY_OT_preset_save, BODY_OT_preset_delete, BODY_OT_check, BODY_OT_unmark,
-           BODY_OT_export_vortex, BODY_OT_export_zip, BODY_OT_to_refit, BODY_PT_panel)
+           BODY_OT_profile_save, BODY_OT_profile_load, BODY_OT_profile_delete, BODY_OT_mirror,
+           BODY_OT_export_vortex, BODY_OT_export_zip, BODY_OT_nexus_shot,
+           BODY_OT_quit_ask, BODY_OT_quit_now, BODY_OT_quit, BODY_PT_panel)
 
 
 def logged(cls):
@@ -1397,6 +1921,11 @@ def register():
         description=tr('Поставить рядом исходное тело, чтобы сравнить', 'Put the original body next to yours to compare'))
     Sc.bs_preset = bpy.props.EnumProperty(name=tr('Пресет', 'Preset'), items=preset_items,
                                           description=tr('Готовый набор ползунков', 'A ready set of sliders'))
+    Sc.bs_symmetry = bpy.props.BoolProperty(
+        name=tr('Симметрия (левая = правая)', 'Symmetry (left = right)'), default=True, update=on_symmetry,
+        description=tr('Что лепишь с одной стороны тела, повторяется с другой', 'What you sculpt on one side repeats on the other'))
+    Sc.bs_profile = bpy.props.EnumProperty(name=tr('Профиль', 'Profile'), items=profile_items,
+                                           description=tr('Сохранённый профиль этого тела', 'A saved profile of this body'))
     for h in (bpy.app.handlers.undo_post, bpy.app.handlers.redo_post):
         for f in [f for f in h if getattr(f, '__name__', '') == 'after_undo']:
             h.remove(f)
